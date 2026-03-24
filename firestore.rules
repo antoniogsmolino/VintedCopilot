@@ -1,0 +1,24 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Policy base sicura: nessun accesso anonimo ai dati non esposti
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Path ottimizzato per la singola lettura aggregata giornaliera
+    // Formato documento atteso: dashboard_data/YYYY-MM-DD
+    match /dashboard_data/{date} {
+      // PERMESSO LETTURA: Permettiamo a tutti (o solo ad anonimi autenticati).
+      // Se usi Firebase Anonymous Auth, scommenta la riga sotto e commenta "if true;"
+      // allow read: if request.auth != null;
+      allow read: if true;
+      
+      // I client B2C non possono MAI scrivere (costruire bottonecke). 
+      // Le uniche scritture arriveranno dal nostro Worker via Firebase Admin SDK.
+      // Firebase Admin SDK bypassa le regole di default, quindi non c'è bisogno di una rule di scrittura.
+      allow write: if false;
+    }
+  }
+}

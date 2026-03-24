@@ -1,0 +1,47 @@
+name: Daily Scraper & Firebase Update
+
+on:
+  schedule:
+    # Esegue ogni giorno alle 00:00 UTC (01:00 o 02:00 in Italia a seconda dell'ora legale)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Permette di eseguire il trigger manualmente su GitHub per testare
+
+jobs:
+  run-scraper:
+    name: Run Scraper and update Firebase
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm' # Usa il package-lock.json o yarn.lock se presenti
+          
+      # Se pubblichi il progetto Node anche su npm:
+      - name: Install Dependencies
+        run: npm ci
+        
+      # NOTA BENE: Assicurati di aggiungere EBAY_APP_ID nei secrets di GitHub
+      - name: Execute eBay Market Scraper
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+        run: node scripts/ebay_scraper.js
+
+      # Lo script per scaricare dati da RSS, Google Trends, eBay e mandarli su DB
+      - name: Execute Dashboard Data Generation
+        env:
+          # Assicurati di aggiungere questa stringa nel repository su GitHub in:
+          # Settings -> Secrets and variables -> Actions -> New repository secret
+          # Deve essere il contenuto minificato del file JSON di credenziali Firebase
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node scripts/update-dashboard.js
+        
+      # NOTA BENE: Se la run fallisce, GitHub ti manderà una notifica via mail gratuitamente
+      - name: Notify on Failure
+        if: failure()
+        run: echo "Scraper failed, check GitHub actions logs"
