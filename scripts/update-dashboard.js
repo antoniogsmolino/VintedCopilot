@@ -59,7 +59,7 @@ async function updateDashboardData() {
     console.log(`✅ [SUCCESSO] Dati aggregati salvati in /dashboard_data/${today}`);
 
     // Chiudiamo l'SDK per permettere al processo Node di terminare pulito
-    await app.delete();
+    await admin.app().delete();
     process.exit(0);
 
   } catch (error) {
