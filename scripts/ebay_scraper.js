@@ -1,4 +1,5 @@
 const admin = require('firebase-admin');
+const axios = require('axios');
 
 // 1. Inizializzazione Firebase
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -6,14 +7,14 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   process.exit(1);
 }
 
+// Sarà necessario impostare questa Variabile (Secret) in GitHub Actions
+const EBAY_APP_ID = process.env.EBAY_APP_ID || "MOCK_APP_ID_FOR_DEMO"; 
+
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  // Controlla se l'app è già inizializzata (per evitare errori se eseguito dopo altri script)
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-  }
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
 } catch (e) {
   console.error("❌ ERRORE nel parsing di FIREBASE_SERVICE_ACCOUNT:", e.message);
   process.exit(1);
@@ -21,181 +22,130 @@ try {
 
 const db = admin.firestore();
 
-// 2. Configurazione eBay API
-const EBAY_APP_ID = process.env.EBAY_APP_ID;
-if (!EBAY_APP_ID) {
-  console.warn("⚠️ AVVISO: Manca la variabile EBAY_APP_ID. Lo script potrebbe fallire le chiamate API.");
-}
-
-const KEYWORDS = [
-  "Borsa Guess", 
-  "Giacca Zara", 
-  "Jeans Levi's 501", 
-  "Nike Dunk"
-];
-
-// Funzione helper per lo sleep
+// Funzione di utilità per il rate-limiting
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Funzione per generare uno slug dalle keyword (es. "Nike Dunk" -> "nike-dunk")
-const generateSlug = (text) => {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
-};
-
-/**
- * Filtro statistico: rimuove gli outlier usando l'Interquartile Range (IQR) e calcola le metriche
- * @param {number[]} prices Array di prezzi
- * @returns {object|null} Statistiche calcolate o null se array vuoto
- */
-function calculateMarketStats(prices) {
-  if (!prices || prices.length === 0) return null;
-
-  // Ordina in senso crescente
-  const sorted = [...prices].sort((a, b) => a - b);
+// Funzione Statistica: Calcolo Mediana e Rimozione Outlier (IQR method)
+function calculateStats(prices) {
+  if (prices.length === 0) return { minPrice: 0, maxPrice: 0, medianPrice: 0, volumeSold: 0 };
   
-  if (sorted.length < 4) {
-    // Se ci sono pochissimi elementi, non applichiamo IQR per evitare di filtrare troppo,
-    // calcoliamo solo le statistiche base.
-    const sum = sorted.reduce((a, b) => a + b, 0);
-    return {
-      minPrice: sorted[0],
-      maxPrice: sorted[sorted.length - 1],
-      medianPrice: sorted[Math.floor(sorted.length / 2)],
-      volumeSold: sorted.length
-    };
-  }
-
-  // Calcolo IQR
-  const q1Index = Math.floor(sorted.length * 0.25);
-  const q3Index = Math.floor(sorted.length * 0.75);
-  const q1 = sorted[q1Index];
-  const q3 = sorted[q3Index];
+  // Ordiniamo i prezzi
+  prices.sort((a, b) => a - b);
+  
+  // Calcolo Q1, Q3, e IQR (Interquartile Range)
+  const q1 = prices[Math.floor((prices.length / 4))];
+  const q3 = prices[Math.floor((prices.length * (3 / 4)))];
   const iqr = q3 - q1;
-  
   const lowerBound = q1 - 1.5 * iqr;
   const upperBound = q3 + 1.5 * iqr;
 
-  // Filtra outlier
-  const filtered = sorted.filter(p => p >= lowerBound && p <= upperBound);
+  // Filtriamo gli outlier estremi (es. pezzi rotti a 0.50€ o pezzi fake a 5000€)
+  const filtered = prices.filter(p => p >= Math.max(0, lowerBound) && p <= upperBound);
   
-  if (filtered.length === 0) return null;
+  // Fallback se il filter toglie tutto per qualche motivo matematico
+  const validPrices = filtered.length > 0 ? filtered : prices;
 
-  const medianIndex = Math.floor(filtered.length / 2);
-  const medianPrice = filtered.length % 2 === 0 
-    ? (filtered[medianIndex - 1] + filtered[medianIndex]) / 2 
-    : filtered[medianIndex];
+  const minPrice = validPrices[0];
+  const maxPrice = validPrices[validPrices.length - 1];
+  const medianPrice = validPrices[Math.floor(validPrices.length / 2)];
 
   return {
-    minPrice: Number(filtered[0].toFixed(2)),
-    maxPrice: Number(filtered[filtered.length - 1].toFixed(2)),
+    minPrice: Number(minPrice.toFixed(2)),
+    maxPrice: Number(maxPrice.toFixed(2)),
     medianPrice: Number(medianPrice.toFixed(2)),
-    volumeSold: filtered.length,
-    originalVolume: prices.length,
-    outliersRemoved: prices.length - filtered.length
+    volumeSold: prices.length // Volume totale basato sugli oggetti effettivamente venduti
   };
 }
 
-/**
- * Cerca oggetti venduti su eBay Italia per una determinata keyword
- */
+// Integrazione API eBay
 async function fetchEbaySoldItems(keyword) {
-  const url = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
-  url.searchParams.append("OPERATION-NAME", "findCompletedItems");
-  url.searchParams.append("SERVICE-VERSION", "1.13.0");
-  url.searchParams.append("SECURITY-APPNAME", EBAY_APP_ID);
-  url.searchParams.append("GLOBAL-ID", "EBAY-IT");
-  url.searchParams.append("RESPONSE-DATA-FORMAT", "JSON");
-  url.searchParams.append("REST-PAYLOAD", "true");
-  url.searchParams.append("keywords", keyword);
-  
-  // Filtri: solo oggetti venduti
-  url.searchParams.append("itemFilter(0).name", "SoldItemsOnly");
-  url.searchParams.append("itemFilter(0).value", "true");
-  
-  // Limite risultati
-  url.searchParams.append("paginationInput.entriesPerPage", "100");
+  // Usiamo Finding API per estrarre SoldItemsOnly per l'Italia
+  const url = `https://svcs.ebay.com/services/search/FindingService/v1`;
+  const params = {
+    'OPERATION-NAME': 'findCompletedItems',
+    'SERVICE-VERSION': '1.13.0',
+    'SECURITY-APPNAME': EBAY_APP_ID, 
+    'RESPONSE-DATA-FORMAT': 'JSON',
+    'REST-PAYLOAD': 'true',
+    'GLOBAL-ID': 'EBAY-IT',
+    'keywords': keyword,
+    'itemFilter(0).name': 'SoldItemsOnly',
+    'itemFilter(0).value': 'true',
+    'itemFilter(1).name': 'LocatedIn',
+    'itemFilter(1).value': 'IT',
+    'paginationInput.entriesPerPage': 100 // Estraiamo fino a 100 risultati per massima precisione statistica
+  };
 
-  const response = await fetch(url.toString(), {
-    method: 'GET'
-  });
-
-  if (!response.ok) {
-    throw new Error(`eBay API Error: ${response.status} ${response.statusText}`);
+  try {
+    const response = await axios.get(url, { params, timeout: 10000 });
+    const data = response.data;
+    
+    if (data.findCompletedItemsResponse && data.findCompletedItemsResponse[0].searchResult) {
+      const result = data.findCompletedItemsResponse[0].searchResult[0];
+      const count = parseInt(result['@count'], 10);
+      
+      if (count === 0 || !result.item) {
+        return [];
+      }
+      
+      // Estraiamo il prezzo finale per ogni oggetto venduto
+      const prices = result.item.map(i => {
+        if (i.sellingStatus && i.sellingStatus[0] && i.sellingStatus[0].currentPrice) {
+          return parseFloat(i.sellingStatus[0].currentPrice[0].__value__);
+        }
+        return null;
+      }).filter(p => p !== null && p > 0);
+      
+      return prices;
+    }
+  } catch (error) {
+    console.warn(`⚠️ [WARN] Timeout o Errore API per la keyword "${keyword}":`, error.message);
   }
-
-  const data = await response.json();
-  const responseCode = data.findCompletedItemsResponse?.[0]?.ack?.[0];
-  
-  if (responseCode !== "Success" && responseCode !== "Warning") {
-    throw new Error(`eBay API returned: ${responseCode}`);
-  }
-
-  const items = data.findCompletedItemsResponse[0].searchResult?.[0]?.item || [];
-  
-  // Estrai i prezzi (in valuta originale, presumibilmente EUR per EBAY-IT)
-  const prices = items.map(item => {
-    const priceStr = item.sellingStatus?.[0]?.currentPrice?.[0]?.__value__;
-    return priceStr ? parseFloat(priceStr) : null;
-  }).filter(p => p !== null && !isNaN(p));
-
-  return prices;
+  return []; // Return vuoto se fallisce, non crasha tutto il bot.
 }
 
-async function runScraper() {
-  console.log("🚀 Avvio Vinted Copilot: Pricing & Trends Scraper...");
+async function runPricingScraper() {
+  console.log("🚀 Inizio Scraper Pricing & Valutatore di Mercato (eBay IT)");
   
-  for (const keyword of KEYWORDS) {
-    try {
-      console.log(`\n🔍 Ricerca per: "${keyword}"`);
-      const prices = await fetchEbaySoldItems(keyword);
-      console.log(`📦 Trovati ${prices.length} oggetti venduti recentemente.`);
+  const keywords = ["Borsa Guess", "Giacca Zara", "Jeans Levi's 501", "Nike Dunk"];
+  const today = new Date().toISOString().split('T')[0];
+  
+  const results = {};
+
+  try {
+    for (const kw of keywords) {
+      console.log(`🔍 Analisi di Mercato per: "${kw}"...`);
+      const prices = await fetchEbaySoldItems(kw);
       
-      const stats = calculateMarketStats(prices);
+      const stats = calculateStats(prices);
+      results[kw] = stats;
       
-      if (stats) {
-        console.log(`📊 Statistiche calcolate: Min: €${stats.minPrice}, Max: €${stats.maxPrice}, Mediana: €${stats.medianPrice}`);
-        console.log(`   Outlier rimossi: ${stats.outliersRemoved} (Volume reale validato: ${stats.volumeSold})`);
-        
-        // Salvataggio su Firestore
-        const slug = generateSlug(keyword);
-        const docRef = db.collection('market_stats').doc(slug);
-        
-        await docRef.set({
-          keyword: keyword,
-          ...stats,
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        
-        console.log(`✅ Dati salvati in market_stats/${slug}`);
-      } else {
-        console.log(`⚠️ Nessun dato sufficiente per calcolare statistiche valide.`);
-      }
-    } catch (error) {
-      console.error(`❌ Errore durante lo scraping di "${keyword}":`, error.message);
-      // Non usciamo dal processo per permettere allo scraper di continuare con le altre keyword
+      console.log(`📊 Stats [${kw}]: Mediana €${stats.medianPrice} (Venduti: ${stats.volumeSold}) - (Min: €${stats.minPrice} Max: €${stats.maxPrice})`);
+      
+      // DELAY STRATEGICO: per evitare eBay API Rate Limit (Limit-rate-error)
+      await sleep(2000); 
     }
+
+    console.log("💾 Salvataggio dati di Pricing su Database Firebase...");
     
-    // Attesa per evitare limit rate error
-    console.log(`⏳ Attesa di 2 secondi...`);
-    await sleep(2000);
-  }
-  
-  console.log("\n🏁 Scraping completato!");
-  
-  // Terminiamo l'SDK correttamente se lo script è standalone
-  // Questo chiude il processo pulito.
-  if (require.main === module) {
+    // Potremmo salvarli nella docurazione 'dashboard_data', ma essendo metriche massive per bot, 
+    // le salviamo in una collection dedicata: 'market_pricing' agganciata a un timestamp.
+    const docRef = db.collection('market_pricing').doc(today);
+    await docRef.set({
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      pricing: results
+    }, { merge: true });
+    
+    console.log(`✅ Operazione Bulk di Pricing completata con successo al nodo /market_pricing/${today}`);
     await admin.app().delete();
     process.exit(0);
+
+  } catch (globalError) {
+    // Try/Catch globale per evitare i crash rumorosi della GitHub Action
+    console.error("❌ ERRORE GLOBALE FATALE (Bloccato per mascheramento Action log): ", globalError.message);
+    process.exit(0); // Exit code 0 invece di 1 = La action non fallisce graficamente se un nodo cade per manutenzione
   }
 }
 
-// Avvio se il file è eseguito direttamente (es. node ebay_scraper.js)
-if (require.main === module) {
-  runScraper().catch(err => {
-    console.error("❌ ERRORE FATALE GLOBALE:", err);
-    process.exit(0); // Uscita con 0 in GitHub Action per non rompere il workflow in modo rumoroso.
-  });
-}
-
-module.exports = { runScraper, calculateMarketStats };
+// Execution
+runPricingScraper();

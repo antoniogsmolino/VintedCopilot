@@ -1,8 +1,8 @@
 const admin = require('firebase-admin');
+const Parser = require('rss-parser');
+const parser = new Parser();
 
 // IN PRODUZIONE (GitHub Actions):
-// Il JSON del Service Account verrà iniettato da un secret GitHub.
-// Qui lo recuperiamo dalla variabile d'ambiente o lanciamo errore se assente.
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   console.error("❌ ERRORE: Manca la variabile FIREBASE_SERVICE_ACCOUNT.");
   process.exit(1);
@@ -10,10 +10,8 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    // databaseURL: "https://vinted-copilot.firebaseio.com" // Da aggiungere se si usa anche RealtimeDB
+    credential: admin.credential.cert(serviceAccount)
   });
 } catch (e) {
   console.error("❌ ERRORE nel parsing di FIREBASE_SERVICE_ACCOUNT:", e.message);
@@ -22,50 +20,89 @@ try {
 
 const db = admin.firestore();
 
+// 1. Funzione per leggere i Trend Giornalieri da Google
+async function fetchGoogleTrends() {
+  try {
+    console.log("-> Recupero Google Trends IT...");
+    const feed = await parser.parseURL('https://trends.google.it/trends/trendingsearches/daily/rss?geo=IT');
+    // Consideriamo solo i primi 5 trend più caldi di oggi in Italia
+    return feed.items.slice(0, 5).map(item => ({
+      keyword: item.title,
+      traffic: item.contentSnippet || "N/A", 
+      pubDate: item.pubDate,
+      link: item.link
+    }));
+  } catch (err) {
+    console.error("Errore fetch Google Trends:", err.message);
+    return [];
+  }
+}
+
+// 2. Funzione per estrarre le Nuove Inserzioni da eBay (rss)
+async function fetchEbayListings(keyword) {
+  try {
+    console.log(`-> Recupero nuove inserzioni eBay per: ${keyword}...`);
+    const query = encodeURIComponent(keyword);
+    // _sop=10 significa "Newly Listed" (Appena messi in vendita), vitale per i "Drop"
+    const feed = await parser.parseURL(`https://www.ebay.it/sch/i.html?_nkw=${query}&_sop=10&_rss=1`); 
+
+    // Prendiamo i 10 più recenti
+    return feed.items.slice(0, 10).map(item => ({
+      id: item.guid || item.link,
+      title: item.title,
+      link: item.link,
+      pubDate: item.pubDate
+    }));
+  } catch (err) {
+    console.error(`Errore fetch eBay per ${keyword}:`, err.message);
+    return [];
+  }
+}
+
+
 async function updateDashboardData() {
   try {
-    // Otteniamo la data odierna in formato YYYY-MM-DD
     const today = new Date().toISOString().split('T')[0];
-
-    console.log(`⏳ Avvio aggiornamento dashboard per data: ${today}...`);
-
-    // Riferimento al documento UNICO che l'app scaricherà
+    console.log(`⏳ Avvio scraping per la data: ${today}...`);
+    
+    // ESEGUE LE CHIAMATE SCRAPER IN PARALLELO PER MASSIMA VELOCITA' (gratuitamente)
+    // Puoi espandere/cambiare le keyword liberamente!
+    const [trends, dropsGiacche, dropsY2k] = await Promise.all([
+      fetchGoogleTrends(),
+      fetchEbayListings("giacca pelle vintage"),
+      fetchEbayListings("borsa y2k")
+    ]);
+    
     const docRef = db.collection('dashboard_data').doc(today);
 
-    // ESEMPIO DI PAYLOAD AGGREGATO:
-    // Mettiamo TUTTO qui dentro. Il client B2C eseguirà 1 SOLA LETTURA per ricevere:
-    // - Trends (es da Google Trends/eBay)
-    // - Drop recenti (da RSS)
-    // - Statistiche di mercato
+    // MEGA-PAYLOAD DENSO
+    // L'app utente scarica esattamente SOLO QUANTO VEDI QUI SOTTO, con 1 sola lettura.
     const aggregatedData = {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      trends: [
-        { keyword: "occhiali prada y2k", score: 99, direction: "up" },
-        { keyword: "y2k bag", score: 85, direction: "up" }
-      ],
-      recentDrops: [
-        { id: "item_101", title: "Levi's 501 Vintage 90s", price: 35.00, url: "..." },
-        { id: "item_102", title: "Giacca Pelle Moto", price: 120.00, url: "..." }
-      ],
       stats: {
-        totalListingsParsed: 3450,
-        averagePrice: 42.50
-      }
+        totalTrends: trends.length,
+        totalVintageDrops: dropsGiacche.length + dropsY2k.length
+      },
+      trends: trends,
+      recentDrops: [
+        ...dropsGiacche,
+        ...dropsY2k
+      ]
     };
 
-    // Usiamo .set() per creare il doc (o sovrascriverlo se stiamo facendo un aggiornamento)
+    // Scrive su Database
     await docRef.set(aggregatedData);
-
-    console.log(`✅ [SUCCESSO] Dati aggregati salvati in /dashboard_data/${today}`);
-
-    // Chiudiamo l'SDK per permettere al processo Node di terminare pulito
-    await admin.app().delete();
+    
+    console.log(`✅ [SUCCESSO] Dati REALI salvati su DB in /dashboard_data/${today}`);
+    
+    await admin.app().delete(); 
     process.exit(0);
 
   } catch (error) {
-    console.error(`❌ [ERRORE DI SCRITTURA] Impossibile salvare su Firestore:`, error);
+    console.error(`❌ [ERRORE DI SCRITTURA]`, error);
     process.exit(1);
   }
 }
 
+// Avvia lo script
 updateDashboardData();
