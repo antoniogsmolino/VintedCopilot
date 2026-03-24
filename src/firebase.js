@@ -4,12 +4,12 @@ import { getFirestore } from 'firebase/firestore';
 // ATTENZIONE: Incolla qui l'oggetto `firebaseConfig` fornito dalla tua Console Firebase!
 // Lo trovi in "Project Settings" -> "General" -> "Your Apps" (Web app)
 const firebaseConfig = {
-  // apiKey: "API_KEY",
-  // authDomain: "PROJECT_ID.firebaseapp.com",
-  // projectId: "PROJECT_ID",
-  // storageBucket: "PROJECT_ID.appspot.com",
-  // messagingSenderId: "SENDER_ID",
-  // appId: "APP_ID"
+  apiKey: "AIzaSyDT8_poZhj__NmnWJ8kLFPt2YELp3IuoMM",
+  authDomain: "vintedcopilot-a6bd3.firebaseapp.com",
+  projectId: "vintedcopilot-a6bd3",
+  storageBucket: "vintedcopilot-a6bd3.firebasestorage.app",
+  messagingSenderId: "241717121516",
+  appId: "1:241717121516:web:41d2e6453292f44425b0c9"
 };
 
 const app = initializeApp(firebaseConfig);
