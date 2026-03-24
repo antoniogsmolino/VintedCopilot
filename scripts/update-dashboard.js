@@ -10,7 +10,7 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     // databaseURL: "https://vinted-copilot.firebaseio.com" // Da aggiungere se si usa anche RealtimeDB
@@ -26,9 +26,9 @@ async function updateDashboardData() {
   try {
     // Otteniamo la data odierna in formato YYYY-MM-DD
     const today = new Date().toISOString().split('T')[0];
-    
+
     console.log(`⏳ Avvio aggiornamento dashboard per data: ${today}...`);
-    
+
     // Riferimento al documento UNICO che l'app scaricherà
     const docRef = db.collection('dashboard_data').doc(today);
 
@@ -40,7 +40,7 @@ async function updateDashboardData() {
     const aggregatedData = {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       trends: [
-        { keyword: "vintage arc'teryx", score: 99, direction: "up" },
+        { keyword: "occhiali prada y2k", score: 99, direction: "up" },
         { keyword: "y2k bag", score: 85, direction: "up" }
       ],
       recentDrops: [
@@ -55,11 +55,11 @@ async function updateDashboardData() {
 
     // Usiamo .set() per creare il doc (o sovrascriverlo se stiamo facendo un aggiornamento)
     await docRef.set(aggregatedData);
-    
+
     console.log(`✅ [SUCCESSO] Dati aggregati salvati in /dashboard_data/${today}`);
-    
+
     // Chiudiamo l'SDK per permettere al processo Node di terminare pulito
-    await app.delete(); 
+    await app.delete();
     process.exit(0);
 
   } catch (error) {
